@@ -110,6 +110,79 @@ class CompressedImageCodec(DataframeColumnCodec):
         return BinaryType()
 
 
+class CompressedImageListCodec(DataframeColumnCodec):
+    def __init__(self, image_codec='png', quality=80):
+        """CompressedImageCodec would compress/encompress images.
+
+        :param image_codec: any format string supported by opencv. e.g. ``png``, ``jpeg``
+        :param quality: used when using ``jpeg`` lossy compression
+        """
+        assert OPENCV_AVAILABLE, "{} requires opencv-python to be installed".format(type(self).__name__)
+
+        self._image_codec = '.' + image_codec
+        self._quality = quality
+
+    def encode(self, unischema_field, value):
+        """Encodes the image using OpenCV."""
+        if unischema_field.numpy_dtype != value.dtype:
+            raise ValueError("Unexpected type of {} feature, expected {}, got {}".format(
+                unischema_field.name, unischema_field.numpy_dtype, value.dtype
+            ))
+
+        if not _is_compliant_shape(value.shape, unischema_field.shape):
+            raise ValueError("Unexpected dimensions of {} feature, expected {}, got {}".format(
+                unischema_field.name, unischema_field.shape, value.shape
+            ))
+
+        if len(value.shape) == 3:
+            # Greyscale image list
+            image_bgr_or_gray_list = value
+        elif len(value.shape) == 4 and value.shape[3] == 3:
+            # Convert RGB to BGR
+            image_bgr_or_gray_list = value[:, :, :, (2, 1, 0)]
+        else:
+            raise ValueError('Unexpected image dimensions. Supported dimensions are (H, W) or (H, W, 3). '
+                             'Got {}'.format(value.shape))
+
+        contents = []
+        for image_bgr_or_gray in image_bgr_or_gray_list:
+            _, content = cv2.imencode(self._image_codec,
+                                      image_bgr_or_gray,
+                                      [int(cv2.IMWRITE_JPEG_QUALITY), self._quality])
+
+            contents.append(bytearray(content))
+
+        memfile = BytesIO()
+        np.save(memfile, contents)
+        return bytearray(memfile.getvalue())
+
+    def decode(self, unischema_field, value):
+        """Decodes the image using OpenCV."""
+
+        memfile = BytesIO(value)
+        image_list = np.load(memfile)
+
+        images = []
+        for value in image_list:
+            # cv returns a BGR or grayscale image. Convert to RGB (unless a grayscale image).
+            image_bgr_or_gray = cv2.imdecode(np.frombuffer(value, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if len(image_bgr_or_gray.shape) == 2:
+                # Greyscale image
+                images.append(image_bgr_or_gray)
+            elif len(image_bgr_or_gray.shape) == 3 and image_bgr_or_gray.shape[2] == 3:
+                # Convert BGR to RGB (opencv assumes BGR)
+                image_rgb = image_bgr_or_gray[:, :, (2, 1, 0)]
+                images.append(image_rgb)
+            else:
+                raise ValueError('Unexpected image dimensions. Supported dimensions are (H, W) or (H, W, 3). '
+                                 'Got {}'.format(image_bgr_or_gray.shape))
+
+        return images
+
+    def spark_dtype(self):
+        return BinaryType()
+
+
 class NdarrayCodec(DataframeColumnCodec):
     """Encodes numpy ndarray into, or decodes an ndarray from, a spark dataframe field."""
 
